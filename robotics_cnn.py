@@ -1,4 +1,5 @@
 import tensorflow as tf
+import numpy as np
 from tensorflow.python.framework import ops
 from tensorflow.python.framework import dtypes
 
@@ -55,11 +56,8 @@ def input_pipeline(image_list, label_list):
 		I decided to leave the output labels as ints, not as onehot as many tensorflow functions use ints instead of onehot, so onehot can be used when needed.
     '''
 	with tf.name_scope('input'):
-		images = ops.convert_to_tensor(image_list, dtype=dtypes.string)
-		labels = ops.convert_to_tensor(label_list, dtype=dtypes.string)
-
 		image_queue, label_queue = tf.train.slice_input_producer(
-			                                [images, labels],
+			                                [image_list, label_list],
 			                                shuffle=True)
 		#File reader and decoder for images and labels goes here
 		with tf.name_scope('image'): 
@@ -71,8 +69,9 @@ def input_pipeline(image_list, label_list):
 			#Any resizing or processing (eg. normalising) goes here
 			with tf.name_scope('normalize'): 
 				image_data = tf.cast(image_data, tf.float32)
-				mean, variance = tf.nn.moments(image_data, [0, 1, 2])
-				image_data = (image_data - mean) #/ tf.sqrt(variance)
+				image_data = tf.image.per_image_whitening(image_data)
+				#mean, variance = tf.nn.moments(image_data, [0, 1, 2])
+				#image_data = (image_data - mean) #/ tf.sqrt(variance)
 				image_data.set_shape([IMAGE_HEIGHT, IMAGE_WIDTH, CHANNELS])
 
 		
@@ -89,7 +88,7 @@ def input_pipeline(image_list, label_list):
 			                                #,num_threads=1
 			                                )
 
-		# tf.image_summary('image', image_batch, max_images=10)
+		tf.image_summary('image', image_batch, max_images=1)
   #       tf.histogram_summary('image', image_batch)
 
 	return image_batch, label_batch
@@ -105,7 +104,7 @@ def weights_xav_uniform_variable(shape, fan_in, fan_out):
 	initial = tf.random_uniform(shape, -u, u)
 	return tf.Variable(initial)
 
-def weights_variable(shape, std):
+def weights_variable_x(shape, std):
 	initial = tf.truncated_normal(shape, stddev=std, name='weights')
 	return tf.Variable(initial)
 
@@ -113,6 +112,28 @@ def weights_variable(shape, std):
 def bias_variable(shape):
   initial = tf.constant(0.0, shape=shape, name='biases')
   return tf.Variable(initial)
+
+def _get_fans(shape):
+  if len(shape) == 2:  # fully connected layer
+    fan_in = shape[0]
+    fan_out = shape[1]
+  elif len(shape) == 4:  # convolutional layer
+    receptive_field_size = np.prod(shape[:2])
+    fan_in = shape[-2] * receptive_field_size
+    fan_out = shape[-1] * receptive_field_size
+  else:
+    raise ValueError('Unrecognized shape %s' % str(shape))
+  return fan_in, fan_out
+
+
+def weights_variable(shape, stddev, name='kaiming_variable'):
+  fan_in, fan_out = _get_fans(shape)
+  scale = np.sqrt(6. / fan_in)
+  initial = tf.random_uniform(shape,
+                              minval=-scale,
+                              maxval=scale,
+                              name='kaiming_init')
+  return tf.Variable(initial, dtype=tf.float32, name=name)
 
 def conv2d(x, W):
   return tf.nn.conv2d(x, W, strides=[1, 1, 1, 1], padding='SAME')
@@ -212,18 +233,26 @@ with tf.name_scope('fully_connected2') as scope:
 with tf.name_scope('fully_connected3') as scope:
 	w = weights_variable([24,12], 0.01)
 	b = bias_variable([12])
-	fully_connected3 = tf.nn.relu(tf.matmul(fully_connected2, w) + b, name="activations")
+	y_pred = tf.matmul(fully_connected2, w) + b
 
 #softmax layer
-with tf.name_scope('softmax') as scope:
-	y_pred = tf.nn.softmax(fully_connected3, name="softmax")
+#with tf.name_scope('softmax') as scope:
+#	y_pred = tf.nn.softmax(fully_connected3, name="softmax")
 
 #loss measure: cross entropy
 with tf.name_scope('loss') as scope:
-	loss = tf.reduce_mean(-tf.reduce_sum(y_onehot * tf.log(y_pred), reduction_indices=[1]), name="loss")
+	loss = tf.reduce_mean(tf.nn.sparse_softmax_cross_entropy_with_logits(y_pred, train_label_batch, name='loss'))
+	# loss = tf.reduce_mean(-tf.reduce_sum(y_onehot * tf.log(y_pred), reduction_indices=[1]), name="loss")
 
 #optimizer here
-train_step = tf.train.GradientDescentOptimizer(1.0).minimize(loss)
+# train_step = tf.train.GradientDescentOptimizer(1.0).minimize(loss)
+opt = tf.train.MomentumOptimizer(learning_rate=0.001, momentum=0.9)
+grads_and_vars = opt.compute_gradients(loss)
+
+for grad, var in grads_and_vars:
+  tf.histogram_summary('gradients/' + grad.op.name, grad)
+
+train_step = opt.apply_gradients(grads_and_vars)
 
 #accuracy measure here
 
